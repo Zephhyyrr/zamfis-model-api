@@ -1,43 +1,48 @@
 from flask import Flask, request, jsonify
-from utils.validators import validate_date_range
+from flask_cors import CORS
 from utils.predictions import make_predictions
 from utils.model_loader import load_models
 import traceback
 
 app = Flask(__name__)
+CORS(app)
 
-# Load both Prophet dan LightGBM models
+# Load Models saat startup (hanya sekali)
 try:
     models = load_models()
-    print("✓ Models berhasil dimuat: Prophet + LightGBM")
+    print("✓ Models berhasil dimuat:", list(models.keys()))
 except Exception as e:
     print(f"✗ Error loading models: {e}")
     traceback.print_exc()
-    models = None
+    models = {}
 
-@app.route('/', methods=['POST'])
-def predict_donation():
-    if models is None:
-        return jsonify({"status": "error", "message": "Models tidak berhasil dimuat"}), 500
-    
-    data = request.get_json()
-    start_str = data.get('start_date')
-    end_str = data.get('end_date')
 
-    if not start_str or not end_str:
-        return jsonify({"status": "error", "message": "Parameter start_date dan end_date wajib diisi."}), 400
+def process_prediction(type_name, request_obj):
+    if type_name not in models:
+        return jsonify({"status": "error", "message": f"Model {type_name} tidak dimuat"}), 500
 
-    is_valid, start_date, end_date, error_msg = validate_date_range(start_str, end_str)
-    
-    if not is_valid:
-        return jsonify({"status": "error", "message": error_msg}), 400
+    model_to_use = models[type_name]
+
+    data = request_obj.get_json() or {}
+    months_ahead = int(data.get('months_ahead', 1))
 
     try:
-        result = make_predictions(models, start_date, end_date)
-        
+        # Panggil make_predictions - hanya butuh model dan jumlah bulan
+        # History lag/residual sudah tersimpan di dalam file .pkl
+        result = make_predictions(model_to_use, months_ahead)
+
+        formatted_result = []
+        for r in result:
+            formatted_result.append({
+                'Tanggal':          r['date'],
+                'Hari_Besar_Islam': r.get('hijri_events', '-'),
+                'Prediksi_Prophet': float(r.get('prophet_prediction', r['predicted_donation'])),
+                'Prediksi_Hybrid':  float(r['predicted_donation'])
+            })
+
         return jsonify({
             "status": "success",
-            "data": result
+            "data": formatted_result
         }), 200
 
     except Exception as e:
@@ -47,16 +52,21 @@ def predict_donation():
         return jsonify({"status": "error", "message": error_msg}), 500
 
 
+@app.route('/predict/income', methods=['POST'])
+def predict_income():
+    return process_prediction('income', request)
+
+
+@app.route('/predict/expense', methods=['POST'])
+def predict_expense():
+    return process_prediction('expense', request)
+
+
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
-    if models is None:
-        return jsonify({"status": "unhealthy", "message": "Models tidak dimuat"}), 503
-    
     return jsonify({
         "status": "healthy",
-        "models": ["Prophet", "LightGBM"],
-        "ensemble_method": "Weighted Average (70% Prophet + 30% LightGBM)"
+        "loaded_models": list(models.keys())
     }), 200
 
 

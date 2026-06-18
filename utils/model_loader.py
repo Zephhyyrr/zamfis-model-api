@@ -1,34 +1,29 @@
 import joblib
 import os
 
-
 def load_models():
     """
-    Memuat kedua model (Prophet dan LightGBM Residual)
+    Memuat model hibrida untuk income dan expense
     
     Returns:
-        dict: Dictionary berisi prophet_model dan lgbm_model
+        dict: Dictionary berisi model income dan expense
     """
     models = {}
     
-    # Load Prophet Model
-    prophet_path = 'models/prophet_model.joblib'
-    if os.path.exists(prophet_path):
-        models['prophet'] = joblib.load(prophet_path)
+    # Load Model Income (Uang Masuk)
+    income_path = 'models/model_surau_uang_masuk.pkl'
+    if os.path.exists(income_path):
+        m = joblib.load(income_path)
+        models['income'] = m
     else:
-        raise FileNotFoundError(f"Prophet model tidak ditemukan: {prophet_path}")
+        print(f"Warning: Model income tidak ditemukan di {income_path}")
     
-    # Load LightGBM Residual Model
-    lgbm_path = 'models/lgbm_residual_model.joblib'
-    if os.path.exists(lgbm_path):
-        models['lgbm'] = joblib.load(lgbm_path)
+    # Load Model Expense (Uang Keluar)
+    expense_path = 'models/model_surau_uang_keluar.pkl'
+    if os.path.exists(expense_path):
+        m = joblib.load(expense_path)
+        models['expense'] = m
     else:
-        raise FileNotFoundError(f"LightGBM model tidak ditemukan: {lgbm_path}")
-    
+        print(f"Warning: Model expense tidak ditemukan di {expense_path}")
+        
     return models
-
-
-def load_model(model_path='models/hybrid_model.pkl'):
-    """Legacy function - gunakan load_models() untuk hybrid predictions"""
-    model = joblib.load(model_path)
-    return model

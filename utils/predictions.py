@@ -1,165 +1,173 @@
 import pandas as pd
 import numpy as np
-from hijri_converter import Gregorian
+from hijridate import Gregorian
+
+PANDEMI_AWAL  = '2020-03-01'
+PANDEMI_AKHIR = '2021-06-01'
 
 
-def get_hijri_month(gregorian_date):
+def add_hijri_flags(frame):
     """
-    Mengkonversi tanggal Gregorian ke bulan Hijriah
-    
-    Args:
-        gregorian_date (datetime): Tanggal Gregorian
-    
-    Returns:
-        int: Bulan Hijriah (1-12)
+    Menambahkan penanda hari besar Islam (Hijriah) ke dataframe bulanan.
+    Persis seperti fungsi di notebook modeling.
     """
-    try:
-        hijri = Gregorian(
-            gregorian_date.year, 
-            gregorian_date.month, 
-            gregorian_date.day
-        ).to_hijri()
-        return hijri.month
-    except Exception:
-        return 0  # Default jika konversi gagal
+    pan_lo = pd.Timestamp(PANDEMI_AWAL)
+    pan_hi = pd.Timestamp(PANDEMI_AKHIR)
+    ram_l, idf_l, ida_l, kecil_l, pan_l, ramd_l = [], [], [], [], [], []
+
+    for ts in frame['ds']:
+        ts_naive = ts.tz_localize(None) if hasattr(ts, 'tzinfo') and ts.tzinfo else ts
+        rng = pd.date_range(ts_naive, ts_naive + pd.offsets.MonthEnd(0))
+        ram = idf = ida = kecil = 0
+        ram_days = 0
+        for d in rng:
+            try:
+                h = Gregorian(d.year, d.month, d.day).to_hijri()
+                if h.month == 9:
+                    ram = 1; ram_days += 1
+                if h.month == 10 and h.day == 1:
+                    idf = 1
+                if h.month == 12 and h.day == 10:
+                    ida = 1
+                if h.month == 3 and 10 <= h.day <= 14:
+                    kecil = 1
+                if h.month == 7 and 25 <= h.day <= 29:
+                    kecil = 1
+                if h.month == 1 and h.day <= 12:
+                    kecil = 1
+            except Exception:
+                pass
+        ram_l.append(ram); idf_l.append(idf); ida_l.append(ida); kecil_l.append(kecil)
+        pan_l.append(1 if (pan_lo <= ts_naive <= pan_hi) else 0)
+        ramd_l.append(ram_days / 30.0)
+
+    frame['is_ramadhan']    = ram_l
+    frame['is_idulfitri']   = idf_l
+    frame['is_iduladha']    = ida_l
+    frame['is_event_kecil'] = kecil_l
+    frame['is_pandemi']     = pan_l
+    frame['ramadhan_days']  = ramd_l
+    return frame
 
 
-def get_hijri_info(gregorian_date):
-    """
-    Mengkonversi tanggal Gregorian ke bulan dan hari Hijriah
-    
-    Args:
-        gregorian_date (datetime): Tanggal Gregorian
-    
-    Returns:
-        tuple: (bulan_hijriah, hari_hijriah)
-    """
-    try:
-        hijri = Gregorian(
-            gregorian_date.year, 
-            gregorian_date.month, 
-            gregorian_date.day
-        ).to_hijri()
-        return hijri.month, hijri.day
-    except Exception:
-        return 0, 0  # Default jika konversi gagal
+def prophet_predict(m, frame, reg):
+    d = frame[['ds']].copy()
+    for r in reg:
+        d[r] = frame[r].values
+    return m.predict(d)['yhat'].values
 
 
-def make_predictions(models, start_date, end_date):
+def get_event_kecil_name(ds):
     """
-    Melakukan prediksi hybrid donasi menggunakan:
-    1. Prophet: Menangkap trend dan seasonality
-    2. LightGBM: Memprediksi residual dari Prophet untuk koreksi
-    
-    Alur:
-    - Prophet → baseline prediction (trend + seasonality)
-    - LightGBM → menerima prophet_pred sebagai feature untuk koreksi residual
-    - Final → prophet_pred + lgbm_residual_pred
-    
-    Args:
-        models (dict): Dictionary berisi 'prophet' dan 'lgbm' models
-        start_date (datetime): Tanggal mulai
-        end_date (datetime): Tanggal akhir
-    
-    Returns:
-        list: List dictionary dengan hasil prediksi hybrid
+    Menentukan nama spesifik event kecil Islam dalam bulan tersebut.
+    Sesuai logika add_hijri_flags di notebook:
+    - Maulid Nabi  : Rabiul Awal bulan 3, hari 10-14
+    - Isra Mi'raj  : Rajab bulan 7, hari 25-29
+    - Muharram/Asyura: Muharram bulan 1, hari 1-12
     """
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    df_future = pd.DataFrame({'ds': date_range})
+    rng = pd.date_range(ds, ds + pd.offsets.MonthEnd(0))
+    names = []
+    for d in rng:
+        try:
+            h = Gregorian(d.year, d.month, d.day).to_hijri()
+            if h.month == 3 and 10 <= h.day <= 14 and 'Maulid Nabi' not in names:
+                names.append('Maulid Nabi')
+            if h.month == 7 and 25 <= h.day <= 29 and "Isra Mi'raj" not in names:
+                names.append("Isra Mi'raj")
+            if h.month == 1 and h.day <= 12 and 'Muharram/Asyura' not in names:
+                names.append('Muharram/Asyura')
+        except Exception:
+            pass
+    return ', '.join(names) if names else 'Event Kecil'
+
+
+def make_predictions(M, months_ahead=1):
+    """
+    Melakukan prediksi hybrid PERSIS seperti fungsi forecast_future di notebook.
+
+    Menggunakan M['history'] dari dalam file .pkl sebagai acuan lag/residual.
+    TIDAK menggunakan data dari database.
+    """
+    prophet = M['prophet']
+    lgbm    = M['lgbm']
+    a       = M['alpha']
+    REG     = M['reg']
+    FEATS   = M['feats']
+
+    # Ambil history yang sudah tersimpan di dalam pkl (persis seperti notebook)
+    hist = M['history'].copy()
+    last = hist['ds'].max()
+
+    # Generate bulan-bulan yang akan diprediksi (mulai 1 bulan setelah data terakhir)
+    future_ds = pd.date_range(last + pd.offsets.MonthBegin(1), periods=months_ahead, freq='MS')
+    fut = pd.DataFrame({'ds': future_ds})
+    fut = add_hijri_flags(fut)
+
+    # Prediksi baseline dari Prophet
+    fut['prophet_pred'] = prophet_predict(prophet, fut, REG)
+
+    # Siapkan resid_hist dari history pkl (persis seperti notebook)
+    resid_hist = list(hist['resid'].values)
+
+    hasil = []
+    prophet_hasil = []
+
+    for _, row in fut.iterrows():
+        fitur = {
+            'lag_1':       resid_hist[-1] if len(resid_hist) >= 1 else 0,
+            'lag_2':       resid_hist[-2] if len(resid_hist) >= 2 else 0,
+            'lag_3':       resid_hist[-3] if len(resid_hist) >= 3 else 0,
+            'roll_mean_3': np.mean(resid_hist[-3:]) if len(resid_hist) >= 3 else 0,
+            'periode':     row['ds'].month
+        }
+        for r in REG:
+            fitur[r] = row[r]
+
+        x  = pd.DataFrame([fitur])[FEATS]
+        rh = lgbm.predict(x)[0]
+        resid_hist.append(rh)
+
+        p_val      = row['prophet_pred']
+        hybrid_val = max(0.0, p_val + a * rh)
+
+        prophet_hasil.append(max(0.0, p_val))
+        hasil.append(hybrid_val)
+
+    fut['prophet_prediction'] = prophet_hasil
+    fut['predicted_donation'] = hasil
     
-    # ======== STEP 1: Prepare ALL regressors untuk Prophet ========
-    # Get Hijri calendar info
-    hijri_info = df_future['ds'].apply(get_hijri_info)
-    df_future[['hijri_month', 'hijri_day']] = pd.DataFrame(hijri_info.tolist(), index=df_future.index)
-    
-    # Regressors
-    df_future['is_friday'] = (df_future['ds'].dt.dayofweek == 4).astype(int)
-    df_future['is_ramadhan'] = (df_future['hijri_month'] == 9).astype(int)
-    df_future['is_last_10_ramadhan'] = ((df_future['hijri_month'] == 9) & (df_future['hijri_day'] >= 21)).astype(int)
-    df_future['is_syawal'] = (df_future['hijri_month'] == 10).astype(int)
-    df_future['is_zulhijjah'] = (df_future['hijri_month'] == 12).astype(int)
-    
-    # is_salary_period: Periode gajian (awal: 1-5, tengah: 15-17, akhir: 25-30)
-    day_of_month = df_future['ds'].dt.day
-    df_future['is_salary_period'] = (
-        ((day_of_month >= 1) & (day_of_month <= 5)) |  # Awal bulan
-        ((day_of_month >= 15) & (day_of_month <= 17)) |  # Tengah bulan
-        ((day_of_month >= 25) & (day_of_month <= 31))    # Akhir bulan
-    ).astype(int)
-    
-    # ======== STEP 2: Prophet Prediction ========
-    prophet_model = models['prophet']
-    prophet_forecast = prophet_model.predict(df_future)
-    prophet_pred = prophet_forecast['yhat'].values
-    
-    # ======== STEP 3: Prepare features untuk LightGBM ========
-    # Time-based features
-    df_future['day_of_week'] = df_future['ds'].dt.dayofweek
-    df_future['day_of_month'] = df_future['ds'].dt.day
-    df_future['month'] = df_future['ds'].dt.month
-    df_future['dayofyear'] = df_future['ds'].dt.dayofyear
-    df_future['quarter'] = df_future['ds'].dt.quarter
-    df_future['prophet_pred'] = prophet_pred
-    
-    # ======== STEP 4: LightGBM Prediction (Residual Correction) ========
-    lgbm_model = models['lgbm']
-    # Features harus sama dengan saat training
-    lgbm_features = [
-        'day_of_week', 'day_of_month', 'month', 'dayofyear', 'quarter',
-        'hijri_month', 
-        'is_friday', 'is_ramadhan', 'is_last_10_ramadhan', 'is_syawal', 'is_zulhijjah',
-        'is_salary_period',
-        'prophet_pred'
-    ]
-    lgbm_residual_pred = lgbm_model.predict(df_future[lgbm_features])
-    
-    # ======== STEP 5: Ensemble - Prophet baseline + LightGBM residual correction ========
-    # LightGBM memprediksi residual, jadi:
-    # final_pred = prophet_pred + lgbm_residual_pred (additive)
-    ensemble_pred = prophet_pred + lgbm_residual_pred
-    
-    # Store predictions
-    df_future['prophet_prediction'] = prophet_pred
-    df_future['lgbm_residual'] = lgbm_residual_pred
-    df_future['ensemble_prediction'] = ensemble_pred
-    df_future['predicted_donation'] = ensemble_pred
-    
-    # Ensure non-negative predictions
-    df_future['predicted_donation'] = df_future['predicted_donation'].apply(
-        lambda x: max(0, round(float(x), 2))
-    )
-    df_future['prophet_prediction'] = df_future['prophet_prediction'].apply(
-        lambda x: max(0, round(float(x), 2))
-    )
-    df_future['lgbm_residual'] = df_future['lgbm_residual'].apply(
-        lambda x: round(float(x), 2)
-    )
-    
-    df_future['ds'] = df_future['ds'].dt.strftime('%Y-%m-%d')
-    
-    # Return hasil prediksi akhir (tanggal + prediksi gabungan)
-    result = df_future[['ds', 'predicted_donation']].rename(
+    # Buat label kalender Hijriah seperti di notebook Colab:
+    # tag = [n.replace('is_', '') for n in REG if r[n]]
+    LABEL_MAP = {
+        'is_ramadhan':    'Ramadhan',
+        'is_idulfitri':   'Idul Fitri',
+        'is_iduladha':    'Idul Adha',
+        'is_event_kecil': None,   # diisi dinamis oleh get_event_kecil_name
+        'is_pandemi':     'Pandemi',
+        'ramadhan_days':  'Bulan Ramadhan',
+    }
+
+    def get_hijri_label(row):
+        tags = []
+        for col in REG:
+            val = row.get(col, 0)
+            if not val:
+                continue
+            if col == 'is_event_kecil':
+                # Tentukan nama event kecil yang spesifik
+                tags.append(get_event_kecil_name(row['ds']))
+            elif col == 'ramadhan_days':
+                pass  # sudah diwakili is_ramadhan, skip agar tidak dobel
+            else:
+                label = LABEL_MAP.get(col, col.replace('is_', ''))
+                tags.append(label)
+        return ', '.join(tags) if tags else '-'
+
+    fut['hijri_events'] = fut.apply(get_hijri_label, axis=1)
+    fut['ds'] = fut['ds'].dt.strftime('%Y-%m-%d')
+
+    result = fut[['ds', 'prophet_prediction', 'predicted_donation', 'hijri_events']].rename(
         columns={'ds': 'date'}
     ).to_dict(orient='records')
-    
-    return result
 
-
-def make_predictions_legacy(model, start_date, end_date):
-    """
-    Legacy function - untuk kompatibilitas dengan Prophet model saja
-    """
-    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    df_future = pd.DataFrame({'ds': date_range})
-    
-    predictions = model.predict(df_future)
-    
-    df_future['predicted_donation'] = predictions['yhat'].values
-    df_future['predicted_donation'] = df_future['predicted_donation'].apply(
-        lambda x: max(0, round(float(x), 2))
-    )
-    df_future['ds'] = df_future['ds'].dt.strftime('%Y-%m-%d')
-    
-    result = df_future.rename(columns={'ds': 'date'}).to_dict(orient='records')
-    
     return result
