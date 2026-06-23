@@ -81,7 +81,38 @@ def get_event_kecil_name(ds):
     return ', '.join(names) if names else 'Event Kecil'
 
 
-def make_predictions(M, months_ahead=1):
+def process_transaction_history(transactions, prophet, REG):
+    """
+    Mengambil raw transaksi dari database, mengubahnya ke format bulanan,
+    dan menghitung residual terhadap prediksi Prophet baseline.
+    """
+    if not transactions:
+        return None
+        
+    df = pd.DataFrame(transactions)
+    if df.empty:
+        return None
+        
+    df['tanggal'] = pd.to_datetime(df['tanggal'])
+    df['tanggal'] = df['tanggal'].apply(lambda x: x.tz_localize(None) if x.tzinfo else x)
+    df = df.rename(columns={'tanggal': 'ds', 'nominal': 'y'})
+    
+    # Resample per bulan
+    df_monthly = df.set_index('ds').resample('MS').sum().reset_index()
+    
+    # Tambahkan flag kalender hijriah
+    df_monthly = add_hijri_flags(df_monthly)
+    
+    # Dapatkan prediksi baseline prophet untuk semua data history
+    df_monthly['prophet_pred'] = prophet_predict(prophet, df_monthly, REG)
+    
+    # Hitung residual nyata (Aktual - Prophet)
+    df_monthly['resid'] = df_monthly['y'] - df_monthly['prophet_pred']
+    
+    return df_monthly
+
+
+def make_predictions(M, months_ahead=1, transactions=None):
     """
     Melakukan prediksi hybrid PERSIS seperti fungsi forecast_future di notebook.
 
@@ -94,8 +125,12 @@ def make_predictions(M, months_ahead=1):
     REG     = M['reg']
     FEATS   = M['feats']
 
-    # Ambil history yang sudah tersimpan di dalam pkl (persis seperti notebook)
-    hist = M['history'].copy()
+    # Jika ada transaksi dari database, gunakan itu untuk mendapatkan history & residual terbaru
+    # Jika tidak ada, gunakan M['history'] default bawaan .pkl
+    hist = process_transaction_history(transactions, prophet, REG)
+    if hist is None or hist.empty:
+        hist = M['history'].copy()
+        
     last = hist['ds'].max()
 
     # Generate bulan-bulan yang akan diprediksi (mulai 1 bulan setelah data terakhir)

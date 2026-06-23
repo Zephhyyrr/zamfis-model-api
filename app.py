@@ -25,11 +25,11 @@ def process_prediction(type_name, request_obj):
 
     data = request_obj.get_json() or {}
     months_ahead = int(data.get('months_ahead', 1))
+    transactions = data.get('transactions', None)
 
     try:
-        # Panggil make_predictions - hanya butuh model dan jumlah bulan
-        # History lag/residual sudah tersimpan di dalam file .pkl
-        result = make_predictions(model_to_use, months_ahead)
+        # Panggil make_predictions dengan transaksi riil (jika ada)
+        result = make_predictions(model_to_use, months_ahead, transactions)
 
         formatted_result = []
         for r in result:
