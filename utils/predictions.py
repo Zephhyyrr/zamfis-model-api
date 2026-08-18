@@ -1,53 +1,8 @@
 import pandas as pd
 import numpy as np
-from hijridate import Gregorian
 
-PANDEMI_AWAL  = '2020-03-01'
-PANDEMI_AKHIR = '2021-06-01'
-
-
-def add_hijri_flags(frame):
-    """
-    Menambahkan penanda hari besar Islam (Hijriah) ke dataframe bulanan.
-    Persis seperti fungsi di notebook modeling.
-    """
-    pan_lo = pd.Timestamp(PANDEMI_AWAL)
-    pan_hi = pd.Timestamp(PANDEMI_AKHIR)
-    ram_l, idf_l, ida_l, kecil_l, pan_l, ramd_l = [], [], [], [], [], []
-
-    for ts in frame['ds']:
-        ts_naive = ts.tz_localize(None) if hasattr(ts, 'tzinfo') and ts.tzinfo else ts
-        rng = pd.date_range(ts_naive, ts_naive + pd.offsets.MonthEnd(0))
-        ram = idf = ida = kecil = 0
-        ram_days = 0
-        for d in rng:
-            try:
-                h = Gregorian(d.year, d.month, d.day).to_hijri()
-                if h.month == 9:
-                    ram = 1; ram_days += 1
-                if h.month == 10 and h.day == 1:
-                    idf = 1
-                if h.month == 12 and h.day == 10:
-                    ida = 1
-                if h.month == 3 and 10 <= h.day <= 14:
-                    kecil = 1
-                if h.month == 7 and 25 <= h.day <= 29:
-                    kecil = 1
-                if h.month == 1 and h.day <= 12:
-                    kecil = 1
-            except Exception:
-                pass
-        ram_l.append(ram); idf_l.append(idf); ida_l.append(ida); kecil_l.append(kecil)
-        pan_l.append(1 if (pan_lo <= ts_naive <= pan_hi) else 0)
-        ramd_l.append(ram_days / 30.0)
-
-    frame['is_ramadhan']    = ram_l
-    frame['is_idulfitri']   = idf_l
-    frame['is_iduladha']    = ida_l
-    frame['is_event_kecil'] = kecil_l
-    frame['is_pandemi']     = pan_l
-    frame['ramadhan_days']  = ramd_l
-    return frame
+from .preprocessing import preprocess_transactions
+from .hijri_utils import add_hijri_flags, get_event_kecil_name
 
 
 def prophet_predict(m, frame, reg):
@@ -57,35 +12,7 @@ def prophet_predict(m, frame, reg):
     return m.predict(d)['yhat'].values
 
 
-def get_event_kecil_name(ds):
-    """
-    Menentukan nama spesifik event kecil Islam dalam bulan tersebut.
-    Sesuai logika add_hijri_flags di notebook:
-    - Maulid Nabi  : Rabiul Awal bulan 3, hari 10-14
-    - Isra Mi'raj  : Rajab bulan 7, hari 25-29
-    - Muharram/Asyura: Muharram bulan 1, hari 1-12
-    """
-    rng = pd.date_range(ds, ds + pd.offsets.MonthEnd(0))
-    names = []
-    for d in rng:
-        try:
-            h = Gregorian(d.year, d.month, d.day).to_hijri()
-            if h.month == 3 and 10 <= h.day <= 14 and 'Maulid Nabi' not in names:
-                names.append('Maulid Nabi')
-            if h.month == 7 and 25 <= h.day <= 29 and "Isra Mi'raj" not in names:
-                names.append("Isra Mi'raj")
-            if h.month == 1 and h.day <= 12 and 'Muharram/Asyura' not in names:
-                names.append('Muharram/Asyura')
-        except Exception:
-            pass
-    return ', '.join(names) if names else 'Event Kecil'
-
-
-def process_transaction_history(transactions, prophet, REG):
-    """
-    Mengambil raw transaksi dari database, mengubahnya ke format bulanan,
-    dan menghitung residual terhadap prediksi Prophet baseline.
-    """
+def process_transaction_history(transactions, prophet, REG, type_name):
     if not transactions:
         return None
         
@@ -97,8 +24,23 @@ def process_transaction_history(transactions, prophet, REG):
     df['tanggal'] = df['tanggal'].apply(lambda x: x.tz_localize(None) if x.tzinfo else x)
     df = df.rename(columns={'tanggal': 'ds', 'nominal': 'y'})
     
+    # Terapkan Preprocessing (IQR, dll)
+    df = preprocess_transactions(df, type_name)
+    if df.empty:
+        return None
+    
     # Resample per bulan
     df_monthly = df.set_index('ds').resample('MS').sum().reset_index()
+    
+    # Selalu hapus bulan terakhir di data (dianggap sebagai bulan berjalan yang belum selesai)
+    # agar tidak mempengaruhi fitur lag
+    if not df_monthly.empty:
+        max_date = df_monthly['ds'].max()
+        print(f"Peringatan: Mengeluarkan bulan terakhir di data ({max_date.strftime('%Y-%m')}) dari history karena dianggap belum selesai.")
+        df_monthly = df_monthly[df_monthly['ds'] < max_date]
+            
+    if df_monthly.empty:
+        return None
     
     # Tambahkan flag kalender hijriah
     df_monthly = add_hijri_flags(df_monthly)
@@ -112,29 +54,38 @@ def process_transaction_history(transactions, prophet, REG):
     return df_monthly
 
 
-def make_predictions(M, months_ahead=1, transactions=None):
-    """
-    Melakukan prediksi hybrid PERSIS seperti fungsi forecast_future di notebook.
-
-    Menggunakan M['history'] dari dalam file .pkl sebagai acuan lag/residual.
-    TIDAK menggunakan data dari database.
-    """
+def make_predictions(M, type_name, months_ahead=1, transactions=None):
     prophet = M['prophet']
     lgbm    = M['lgbm']
     a       = M['alpha']
     REG     = M['reg']
     FEATS   = M['feats']
 
-    # Jika ada transaksi dari database, gunakan itu untuk mendapatkan history & residual terbaru
+    # Tentukan bulan terakhir dari raw transaksi (sebelum di-drop)
+    original_max_date = None
+    if transactions:
+        df_temp = pd.DataFrame(transactions)
+        if not df_temp.empty:
+            df_temp['tanggal'] = pd.to_datetime(df_temp['tanggal'])
+            df_temp['tanggal'] = df_temp['tanggal'].apply(lambda x: x.tz_localize(None) if x.tzinfo else x)
+            original_max_date = df_temp['tanggal'].max().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     # Jika tidak ada, gunakan M['history'] default bawaan .pkl
-    hist = process_transaction_history(transactions, prophet, REG)
+    hist = process_transaction_history(transactions, prophet, REG, type_name)
     if hist is None or hist.empty:
         hist = M['history'].copy()
         
     last = hist['ds'].max()
 
-    # Generate bulan-bulan yang akan diprediksi (mulai 1 bulan setelah data terakhir)
-    future_ds = pd.date_range(last + pd.offsets.MonthBegin(1), periods=months_ahead, freq='MS')
+    if original_max_date is not None and original_max_date > last:
+        target_start = original_max_date + pd.offsets.MonthBegin(1)
+    else:
+        target_start = last + pd.offsets.MonthBegin(1)
+
+    target_end = target_start + pd.offsets.MonthBegin(months_ahead - 1)
+    
+    # Generate bulan-bulan yang akan diprediksi (mulai 1 bulan setelah 'last', sampai 'target_end')
+    future_ds = pd.date_range(last + pd.offsets.MonthBegin(1), target_end, freq='MS')
     fut = pd.DataFrame({'ds': future_ds})
     fut = add_hijri_flags(fut)
 
@@ -143,6 +94,10 @@ def make_predictions(M, months_ahead=1, transactions=None):
 
     # Siapkan resid_hist dari history pkl (persis seperti notebook)
     resid_hist = list(hist['resid'].values)
+    
+    data_quality_warning = None
+    if len(resid_hist) < 3:
+        data_quality_warning = "History residual kurang dari 3 bulan, akurasi forecast berkurang"
 
     hasil = []
     prophet_hasil = []
@@ -170,9 +125,9 @@ def make_predictions(M, months_ahead=1, transactions=None):
 
     fut['prophet_prediction'] = prophet_hasil
     fut['predicted_donation'] = hasil
+    if data_quality_warning:
+        fut['data_quality_warning'] = data_quality_warning
     
-    # Buat label kalender Hijriah seperti di notebook Colab:
-    # tag = [n.replace('is_', '') for n in REG if r[n]]
     LABEL_MAP = {
         'is_ramadhan':    'Ramadhan',
         'is_idulfitri':   'Idul Fitri',
@@ -201,8 +156,16 @@ def make_predictions(M, months_ahead=1, transactions=None):
     fut['hijri_events'] = fut.apply(get_hijri_label, axis=1)
     fut['ds'] = fut['ds'].dt.strftime('%Y-%m-%d')
 
-    result = fut[['ds', 'prophet_prediction', 'predicted_donation', 'hijri_events']].rename(
+    cols_to_export = ['ds', 'prophet_prediction', 'predicted_donation', 'hijri_events']
+    if data_quality_warning:
+        cols_to_export.append('data_quality_warning')
+        
+    result = fut[cols_to_export].rename(
         columns={'ds': 'date'}
     ).to_dict(orient='records')
+    
+    # Filter hanya kembalikan hasil mulai dari target_start
+    target_start_str = target_start.strftime('%Y-%m-%d')
+    result = [r for r in result if r['date'] >= target_start_str]
 
     return result

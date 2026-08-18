@@ -29,16 +29,19 @@ def process_prediction(type_name, request_obj):
 
     try:
         # Panggil make_predictions dengan transaksi riil (jika ada)
-        result = make_predictions(model_to_use, months_ahead, transactions)
+        result = make_predictions(model_to_use, type_name, months_ahead, transactions)
 
         formatted_result = []
         for r in result:
-            formatted_result.append({
+            item = {
                 'Tanggal':          r['date'],
                 'Hari_Besar_Islam': r.get('hijri_events', '-'),
                 'Prediksi_Prophet': float(r.get('prophet_prediction', r['predicted_donation'])),
                 'Prediksi_Hybrid':  float(r['predicted_donation'])
-            })
+            }
+            if 'data_quality_warning' in r:
+                item['data_quality_warning'] = r['data_quality_warning']
+            formatted_result.append(item)
 
         return jsonify({
             "status": "success",
