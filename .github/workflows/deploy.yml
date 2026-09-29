@@ -1,9 +1,7 @@
 name: Deploy Python Models
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   deploy:
