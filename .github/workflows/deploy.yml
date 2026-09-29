@@ -14,16 +14,20 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            # 1. Muat NVM/Node.js environment agar perintah 'pm2' dikenali oleh GitHub Actions
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            
             cd /var/www/surauzamzam/models
             git pull origin main
             
-            # Buat virtual environment jika belum ada
+            # 2. Gunakan python3.10 (hasil kompilasi kita) agar Flask 3.1.1 tidak error
             if [ ! -d "venv" ]; then
-              python3 -m venv venv
+              python3.10 -m venv venv
             fi
             
-            # Install dependensi baru menggunakan pip dari venv
+            # 3. Install dependensi
             venv/bin/pip install -r requirements.txt
             
-            # Restart service Python di PM2
+            # 4. Restart service Python di PM2
             pm2 restart models-api
