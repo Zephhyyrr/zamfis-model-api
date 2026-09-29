@@ -29,7 +29,7 @@ jobs:
             if pm2 describe models-api > /dev/null; then
               pm2 restart models-api
             else
-              pm2 start "venv/bin/gunicorn -w 4 -b 0.0.0.0:5000 main:app" --name models-api
+              pm2 start "venv/bin/gunicorn -w 4 -b 0.0.0.0:5000 app:app" --name models-api
             fi
             
             pm2 save
