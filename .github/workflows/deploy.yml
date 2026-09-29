@@ -30,4 +30,4 @@ jobs:
             venv/bin/pip install -r requirements.txt
             
             # 4. Restart service Python di PM2
-            pm2 restart models-api
+            pm2 restart models || pm2 start main.py --name models
